@@ -148,4 +148,49 @@ def main():
                 
                 for entry in logs:
                     try:
-                        message = json.loads(entry["message"])["
+                        message = json.loads(entry["message"])["message"]
+                        if message["method"] == "Network.requestWillBeSent":
+                            url = message["params"]["request"]["url"]
+                            
+                            # Broadened search: .m3u8, .m3u, or specific keywords
+                            if ".m3u" in url and "http" in url:
+                                found_link = url
+                                # If it has a token, it's likely the master. Priority break.
+                                if "token" in url or "ttl" in url: 
+                                    break
+                    except:
+                        continue
+                
+                if found_link:
+                    logging.info(f"    [+] Success! {found_link[:40]}...")
+                    valid_streams.append({'name': channel['name'], 'link': found_link})
+                else:
+                    logging.warning("    [-] No stream captured.")
+
+                # Switch back to main content for next loop
+                driver.switch_to.default_content()
+
+            except Exception as e:
+                logging.error(f"    [!] Error: {e}")
+                # Ensure we are back in main content context even if error
+                driver.switch_to.default_content()
+
+    except Exception as e:
+        logging.critical(f"Global Crash: {e}")
+    
+    finally:
+        if driver:
+            driver.quit()
+        
+        if valid_streams:
+            with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+                f.write("#EXTM3U\n")
+                for stream in valid_streams:
+                    f.write(f'#EXTINF:-1 group-title="TimStreams",{stream["name"]}\n')
+                    f.write(f'{stream["link"]}\n')
+            logging.info(f"[*] DONE. Saved {len(valid_streams)} streams.")
+        else:
+            logging.warning("[!] No streams found.")
+
+if __name__ == "__main__":
+    main()
