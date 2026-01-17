@@ -12,147 +12,147 @@ from webdriver_manager.chrome import ChromeDriverManager
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
 OUTPUT_FILE = "timstreams_247.m3u"
-MAX_WORKERS = 3  # Simultaneous tabs
-TIMEOUT = 15     # Seconds to wait for elements
+MAX_WORKERS = 2  # Keep low to avoid blocking
+TIMEOUT = 20
 
 def setup_driver():
-    """Creates a headless Chrome instance."""
+    """Creates a headless Chrome instance with anti-detection."""
     chrome_options = Options()
     chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_argument("--window-size=1920,1080") # Important for some layouts
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36")
     
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=chrome_options)
 
 def get_247_channel_list():
-    """
-    Navigates to Home -> Clicks '24/7 Channels' -> Scrapes Links.
-    """
     print(f"[*] Navigating to {BASE_URL}...")
     driver = setup_driver()
     links_found = []
     
     try:
         driver.get(BASE_URL)
+        original_window = driver.current_window_handle
         
-        # 1. FIND THE '24/7 Channels' BUTTON SEEN IN THE IMAGE
-        # We use XPath to find the element containing that exact text.
-        print("[*] Looking for '24/7 Channels' section...")
+        # 1. Click '24/7 Channels'
         wait = WebDriverWait(driver, TIMEOUT)
-        
-        # This XPath finds any element (a, div, button) containing the text "24/7 Channels"
-        category_btn = wait.until(
-            EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '24/7 Channels')]"))
-        )
-        
-        # Click to enter the category
+        print("[*] Looking for '24/7 Channels' button...")
+        category_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '24/7 Channels')]")))
         category_btn.click()
         
-        # 2. WAIT FOR THE CHANNELS TO LOAD
-        # We wait for the URL to change OR for new 'a' tags to appear
-        time.sleep(3) # Short sleep to allow page transition/animation
-        
-        print(f"[*] Scanning channel list on: {driver.current_url}")
-        
-        # 3. SCRAPE CHANNEL LINKS
+        time.sleep(5) # Generous wait for animation/load
+
+        # 2. Check for New Tab
+        if len(driver.window_handles) > 1:
+            print("[!] New tab detected. Switching...")
+            driver.switch_to.window(driver.window_handles[-1])
+
+        # 3. Scrape ALL links (Removed domain filter)
+        print(f"[*] Scanning for channels on: {driver.current_url}")
         elements = driver.find_elements(By.TAG_NAME, "a")
         
+        # Keywords to skip
+        ignore_list = ['donate', 'login', 'register', 'discord', 'contact', 'policy', 'multiview', 'upcoming', 'replay']
+
         for elem in elements:
             try:
                 href = elem.get_attribute("href")
                 text = elem.text.strip()
                 
-                # Filter: Ensure link is valid and not a navigation link (like 'Home' or 'Donate')
-                if href and BASE_URL in href and text:
-                    # Exclude the category buttons themselves if they are still visible
-                    if "24/7 Channels" in text or "Upcoming" in text:
+                if href and text:
+                    # Filter out obvious non-channel links
+                    if any(bad in text.lower() for bad in ignore_list):
                         continue
-                        
+                    
+                    # Filter out empty or javascript links
+                    if "javascript" in href or href == BASE_URL:
+                        continue
+
                     # Avoid duplicates
                     if not any(d['url'] == href for d in links_found):
                         links_found.append({'name': text, 'url': href})
             except:
                 continue
+        
+        # DEBUG: Take a screenshot if no links found
+        if len(links_found) < 3:
+            print("[!] Warning: Very few links found. Saving debug screenshot...")
+            driver.save_screenshot("debug_page.png")
 
     except Exception as e:
         print(f"[!] Error finding channel list: {e}")
+        driver.save_screenshot("debug_error.png")
     finally:
         driver.quit()
         
-    print(f"[*] Found {len(links_found)} channels in '24/7' section.")
+    print(f"[*] Found {len(links_found)} potential channels.")
     return links_found
 
 def process_channel(channel_info):
-    """
-    Worker: Visits a specific channel URL and extracts the m3u8.
-    """
     driver = setup_driver()
     m3u8_link = None
     
     try:
         driver.get(channel_info['url'])
-        time.sleep(2) # Allow JS player to load
+        time.sleep(4) # Wait for player
         
-        # Grab source code
+        # Scan full page source (HTML + JS)
         page_source = driver.page_source
         
-        # Regex to find .m3u8 links (even if hidden in JS)
-        # Matches: http...m3u8 or https...m3u8
-        regex = r'(https?://[^\s"\']+\.m3u8[^\s"\']*)'
-        
+        # Regex for m3u8
+        regex = r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)'
         matches = re.findall(regex, page_source)
-        if matches:
-            # Clean up the link (remove potential trailing characters from regex capture)
-            clean_link = matches[0].strip('",\'')
-            if "token" in clean_link or "m3u8" in clean_link:
-                m3u8_link = clean_link
         
+        if matches:
+            m3u8_link = matches[0].strip('",\'')
+        else:
+            # Fallback: Check iframes specifically
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            for iframe in iframes:
+                src = iframe.get_attribute("src")
+                if src and ".m3u8" in src:
+                    m3u8_link = src
+                    break
+
     except Exception:
         pass
     finally:
         driver.quit()
         
     if m3u8_link:
-        print(f"   [+] {channel_info['name']}: Found Stream")
+        print(f"   [+] {channel_info['name']}")
         return {'name': channel_info['name'], 'link': m3u8_link}
     else:
-        print(f"   [-] {channel_info['name']}: No stream found")
+        print(f"   [-] {channel_info['name']}: Not found")
         return None
 
 def main():
-    # Step 1: Get the list of channels from the 24/7 section
     channels = get_247_channel_list()
     
     if not channels:
-        print("[!] No channels found. The button text might differ or site is protected.")
+        print("[!] No channels found. Check 'debug_page.png' in the repo.")
         return
 
     valid_streams = []
-
-    # Step 2: Scrape streams in parallel
-    print(f"[*] Extracting streams with {MAX_WORKERS} workers...")
+    print(f"[*] Extracting streams from {len(channels)} channels...")
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_channel = {executor.submit(process_channel, ch): ch for ch in channels}
-        
         for future in concurrent.futures.as_completed(future_to_channel):
             result = future.result()
             if result:
                 valid_streams.append(result)
 
-    # Step 3: Save to M3U
     if valid_streams:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
             for stream in valid_streams:
-                f.write(f'#EXTINF:-1 group-title="24/7 Channels",{stream["name"]}\n')
+                f.write(f'#EXTINF:-1 group-title="TimStreams",{stream["name"]}\n')
                 f.write(f'{stream["link"]}\n')
-        print(f"[*] Success! Saved {len(valid_streams)} channels to {OUTPUT_FILE}")
-    else:
-        print("[!] No valid streams extracted.")
+        print(f"[*] Saved {len(valid_streams)} streams to {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     main()
