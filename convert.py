@@ -1,7 +1,8 @@
 import time
 import json
 import logging
-import traceback
+import re
+from urllib.parse import urljoin
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -12,11 +13,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
-OUTPUT_FILE = "timstreams_v13.m3u"
+OUTPUT_FILE = "timstreams_v15.m3u"
 LOG_FILE = "scraper.log"
 TIMEOUT = 30
 
-# Setup Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -41,77 +41,87 @@ def main():
     valid_streams = []
     
     try:
-        logging.info(f"[*] Starting Scraper v13.0 (Div-Clicker Mode)...")
+        logging.info("[*] Starting Scraper v15.0 (Direct Link Extractor)...")
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
         
+        # --- 1. NAVIGATE TO 24/7 PAGE ---
         logging.info("[*] Navigating to homepage...")
         driver.get(BASE_URL)
         
-        # --- 1. NAVIGATE TO 24/7 PAGE ---
-        logging.info("[*] Clicking '24/7 Channels'...")
+        logging.info("[*] Entering '24/7 Channels'...")
         try:
+            # We use the text to find the menu button
             btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '24/7 Channels')]")))
             driver.execute_script("arguments[0].click();", btn)
         except Exception as e:
-            logging.critical("[!] Start button not found.")
+            logging.critical("[!] Menu button failed.")
             raise e
 
-        # --- 2. WAIT FOR GRID ---
-        logging.info("[*] Waiting for grid...")
+        # --- 2. WAIT FOR GRID & BUTTONS ---
+        logging.info("[*] Waiting for 'Tune In' buttons...")
         try:
-            wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '24/7:')]")))
+            # Based on your image, we look for buttons with class 'btn-watch'
+            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "btn-watch")))
             time.sleep(5) 
         except:
-            logging.critical("[!] Grid failed to load.")
-            raise Exception("Grid timeout")
+            logging.critical("[!] Grid timeout.")
+            raise Exception("Grid load failed")
 
-        # --- 3. GET CHANNEL NAMES ---
-        elements = driver.find_elements(By.XPATH, "//*[contains(text(), '24/7:')]")
-        channel_names = [e.text.strip() for e in elements if e.text.strip()]
-        logging.info(f"[*] Found {len(channel_names)} channels to process.")
+        # --- 3. EXTRACT TARGET URLS (No Clicking!) ---
+        # Instead of clicking, we read the 'onclick' attribute directly.
+        # Format: onclick="location.href='watch.html?id=247-bluey'"
+        buttons = driver.find_elements(By.CLASS_NAME, "btn-watch")
+        logging.info(f"[*] Found {len(buttons)} 'Tune In' buttons.")
+        
+        channels_to_visit = []
+        
+        for btn in buttons:
+            try:
+                # 1. Get the onclick text
+                onclick_text = btn.get_attribute("onclick")
+                
+                # 2. Get the Name (from the sibling h3 tag)
+                # Structure: div > h3 (Title) ... button (Tune In)
+                parent_card = btn.find_element(By.XPATH, "./..")
+                raw_name = parent_card.find_element(By.TAG_NAME, "h3").text.strip()
+                clean_name = raw_name.replace("24/7:", "").strip()
+                
+                # 3. Extract the URL using Regex
+                # Looks for: 'something.html' or "something.html"
+                match = re.search(r"['\"](.*?)['\"]", onclick_text)
+                if match:
+                    relative_url = match.group(1)
+                    full_url = urljoin(BASE_URL, relative_url)
+                    
+                    # Avoid duplicates
+                    if not any(x['url'] == full_url for x in channels_to_visit):
+                         channels_to_visit.append({'name': clean_name, 'url': full_url})
+            except Exception as e:
+                continue
 
-        # --- 4. PROCESS LOOP ---
-        for i, raw_name in enumerate(channel_names):
-            clean_name = raw_name.replace("24/7:", "").strip()
-            logging.info(f"[{i+1}/{len(channel_names)}] Processing: {clean_name}")
+        logging.info(f"[*] Extracted {len(channels_to_visit)} valid channel URLs.")
+
+        # --- 4. VISIT & SNIFF LOOP ---
+        for i, channel in enumerate(channels_to_visit):
+            logging.info(f"[{i+1}/{len(channels_to_visit)}] Visiting: {channel['name']}")
             
             try:
-                # A. Find the text element again
-                text_el = driver.find_element(By.XPATH, f"//*[contains(text(), '{raw_name}')]")
+                # Direct Navigation (Fast & Reliable)
+                driver.get(channel['url'])
                 
-                # B. CLICK STRATEGY (The Fix)
-                # Strategy 1: Click the text directly
-                current_url = driver.current_url
-                driver.execute_script("arguments[0].click();", text_el)
+                # Wait for player
+                time.sleep(2)
                 
-                # Check if URL changed
-                time.sleep(1)
-                if driver.current_url == current_url:
-                    # Strategy 2: Click the PARENT element (The Card Div)
-                    logging.info("    - Text click failed. Clicking parent...")
-                    parent = text_el.find_element(By.XPATH, "./..")
-                    driver.execute_script("arguments[0].click();", parent)
-                
-                # Wait for navigation
-                try:
-                    WebDriverWait(driver, 5).until(EC.url_changes(current_url))
-                    logging.info("    [+] Navigation confirmed.")
-                except:
-                    logging.warning("    [!] URL did not change. Skipping.")
-                    continue 
-
-                # C. Force Play & Sniff
-                time.sleep(2) # Wait for page load
-                
-                # Try to press play on video tag
+                # Attempt Auto-Play
                 try:
                     driver.execute_script("document.getElementsByTagName('video')[0].play()")
                 except:
                     pass
 
-                time.sleep(5) # Sniff duration
+                time.sleep(6) # Sniffing Window
                 
+                # Sniff Network Logs
                 found_link = None
                 logs = driver.get_log("performance")
                 for entry in logs:
@@ -119,49 +129,39 @@ def main():
                         message = json.loads(entry["message"])["message"]
                         if message["method"] == "Network.requestWillBeSent":
                             url = message["params"]["request"]["url"]
+                            # Look for m3u8
                             if ".m3u8" in url and "http" in url:
                                 found_link = url
                                 if "token" in url: break
                     except:
                         continue
-
+                
                 if found_link:
-                    logging.info(f"    [+] Found Stream!")
-                    valid_streams.append({'name': clean_name, 'link': found_link})
+                    logging.info("    [+] Stream Found!")
+                    valid_streams.append({'name': channel['name'], 'link': found_link})
                 else:
-                    logging.warning("    [-] No M3U8 traffic.")
-
-                # D. Go Back safely
-                driver.back()
-                wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '24/7:')]")))
-                time.sleep(2)
+                    logging.warning("    [-] No M3U8 captured.")
 
             except Exception as e:
-                logging.error(f"    [!] Failed: {e}")
-                # Reset
-                driver.get(BASE_URL)
-                time.sleep(2)
-                try:
-                    driver.find_element(By.XPATH, "//*[contains(text(), '24/7 Channels')]").click()
-                    time.sleep(3)
-                except:
-                    pass
+                logging.error(f"    [!] Error: {e}")
 
     except Exception as e:
         logging.critical(f"Global Crash: {e}")
-        traceback.print_exc()
-
+    
     finally:
         if driver:
             driver.quit()
         
+        # Save M3U
         if valid_streams:
             with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                 f.write("#EXTM3U\n")
                 for stream in valid_streams:
                     f.write(f'#EXTINF:-1 group-title="TimStreams",{stream["name"]}\n')
                     f.write(f'{stream["link"]}\n')
-            logging.info(f"[*] Saved {len(valid_streams)} streams.")
+            logging.info(f"[*] SUCCESS: Saved {len(valid_streams)} streams.")
+        else:
+            logging.warning("[!] No streams found.")
 
 if __name__ == "__main__":
     main()
