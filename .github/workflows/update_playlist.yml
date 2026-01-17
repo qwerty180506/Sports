@@ -30,8 +30,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Scraper
-        run: python timstreams_scraper.py
-        # Make sure 'timstreams_scraper.py' matches your actual filename
+        run: python convert.py
+        
 
       - name: Commit and Push changes
         run: |
