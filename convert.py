@@ -30,10 +30,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
-OUTPUT_FILE = "timstreams_sports.m3u"
+OUTPUT_FILE = "timstreams_sports.m3u"  # Matches the YAML fix below
 LOG_FILE = "scraper.log"
-TIMEOUT = 30
-MAX_WORKERS = 2  # Run 2 browsers in parallel (Safe for GitHub Actions)
+TIMEOUT = 25     # Reduced timeout to fail faster on dead channels
+MAX_WORKERS = 5  # INCREASED from 2 to 5 for faster parallel processing
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,7 +50,7 @@ def create_driver():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # Suppress selenium-wire logs to keep output clean
+    # Suppress selenium-wire logs
     logging.getLogger('seleniumwire').setLevel(logging.ERROR)
     
     service = Service(ChromeDriverManager().install())
@@ -63,9 +63,6 @@ def create_driver():
     return driver
 
 def get_sports_channels():
-    """
-    Navigates to the page, applies the Sports filter, and extracts links.
-    """
     driver = create_driver()
     wait = WebDriverWait(driver, TIMEOUT)
     channels = []
@@ -83,13 +80,12 @@ def get_sports_channels():
         # Apply Sports Filter
         logging.info("[*] Applying 'Sports' Category Filter...")
         try:
-            # Attempt 1: Standard Select
             select_element = driver.find_element(By.TAG_NAME, "select")
             select = Select(select_element)
             select.select_by_visible_text("Sports")
-            time.sleep(3) # Wait for grid refresh
+            time.sleep(2)
         except:
-            logging.warning("[!] Filter click failed. Will filter by text content instead.")
+            logging.warning("[!] Filter click failed. Using text fallback.")
 
         # Extract Visible Channels
         buttons = driver.find_elements(By.CLASS_NAME, "btn-watch")
@@ -100,13 +96,12 @@ def get_sports_channels():
                 if not btn.is_displayed():
                     continue
                 
-                # Double Check: Look for "Sports" text in the card description
+                # Verify "Sports" text is in the card
                 parent = btn.find_element(By.XPATH, "./..")
                 card_text = parent.text.lower()
                 
-                # Strict Filter: Only add if card explicitly says "Sports" or we successfully filtered earlier
-                # (You can remove 'or True' to enforce strict text filtering if the dropdown fails)
-                if "sports" in card_text or "espn" in card_text or "nfl" in card_text: 
+                # Check for Sports keywords
+                if "sports" in card_text or "espn" in card_text or "nfl" in card_text or "league" in card_text: 
                     onclick = btn.get_attribute("onclick")
                     raw_name = parent.find_element(By.TAG_NAME, "h3").text.strip().replace("24/7:", "").strip()
                     
@@ -127,45 +122,38 @@ def get_sports_channels():
     return channels
 
 def process_channel(channel_info):
-    """
-    Worker function to process a single channel.
-    """
     driver = create_driver()
     found_link = None
     
     try:
-        # logging.info(f"    -> Checking: {channel_info['name']}")
         driver.get(channel_info['url'])
         
-        # Handle Iframe
-        time.sleep(2)
+        # Handle Iframe (Fast Check)
+        time.sleep(1) # Reduced wait
         iframes = driver.find_elements(By.TAG_NAME, "iframe")
         if iframes:
             driver.switch_to.frame(iframes[0])
-            time.sleep(1)
+            time.sleep(0.5)
             try:
-                # Center click
                 video = driver.find_element(By.TAG_NAME, "video")
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", video)
                 driver.execute_script("arguments[0].click();", video)
             except: pass
         
-        # SMART WAIT LOOP (The Speed Fix)
-        # Instead of sleeping 8s, we check every 0.5s for up to 10s
-        for _ in range(20): 
+        # SMART WAIT LOOP (Fast Exit)
+        # Checks every 0.5s, max 8s total
+        for _ in range(16): 
             for request in driver.requests:
                 if request.response:
                     url = request.url
                     if ".m3u8" in url and "http" in url:
-                        # Success! Found it early.
                         found_link = url
                         break
             if found_link:
                 break
             time.sleep(0.5)
             
-    except Exception as e:
-        # logging.error(f"    [!] Error on {channel_info['name']}: {e}")
+    except Exception:
         pass
     finally:
         driver.quit()
@@ -174,34 +162,27 @@ def process_channel(channel_info):
         logging.info(f"    [+] {channel_info['name']} -> Found!")
         return {'name': channel_info['name'], 'link': found_link}
     else:
-        logging.warning(f"    [-] {channel_info['name']} -> No stream.")
+        # logging.warning(f"    [-] {channel_info['name']} -> No stream.")
         return None
 
 def main():
     start_time = time.time()
-    
-    # 1. Get Channel List
     channels = get_sports_channels()
     
     if not channels:
         logging.error("[!] No channels found. Exiting.")
         return
 
-    # 2. Parallel Processing
     logging.info(f"[*] Extracting streams using {MAX_WORKERS} workers...")
     valid_streams = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Submit all tasks
         future_to_channel = {executor.submit(process_channel, ch): ch for ch in channels}
-        
-        # Process as they complete
         for future in concurrent.futures.as_completed(future_to_channel):
             result = future.result()
             if result:
                 valid_streams.append(result)
 
-    # 3. Save
     if valid_streams:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
