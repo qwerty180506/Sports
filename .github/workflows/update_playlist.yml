@@ -1,0 +1,42 @@
+name: Update M3U Playlist
+
+# Trigger the workflow:
+# 1. On a schedule (e.g., every 6 hours)
+# 2. Manually (via the "Run workflow" button)
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Runs every 6 hours
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Scraper
+        run: python timstreams_scraper.py
+        # Make sure 'timstreams_scraper.py' matches your actual filename
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add *.m3u
+          # The specific logic to check if there are changes before committing
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update playlist [skip ci]" && git push)
