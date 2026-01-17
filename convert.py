@@ -4,6 +4,7 @@ import time
 import logging
 import re
 import json
+import concurrent.futures
 from urllib.parse import urljoin
 
 # --- AUTO-INSTALLER ---
@@ -29,9 +30,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
-OUTPUT_FILE = "timstreams_sports.m3u"  # Renamed for clarity
+OUTPUT_FILE = "timstreams_sports.m3u"
 LOG_FILE = "scraper.log"
-TIMEOUT = 45
+TIMEOUT = 30
+MAX_WORKERS = 2  # Run 2 browsers in parallel (Safe for GitHub Actions)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,7 +41,7 @@ logging.basicConfig(
     handlers=[logging.FileHandler(LOG_FILE, mode='w'), logging.StreamHandler()]
 )
 
-def setup_driver():
+def create_driver():
     options = Options()
     options.add_argument("--headless") 
     options.add_argument("--disable-gpu")
@@ -48,150 +50,169 @@ def setup_driver():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
+    # Suppress selenium-wire logs to keep output clean
+    logging.getLogger('seleniumwire').setLevel(logging.ERROR)
+    
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
     
-    # Disable Debugger to prevent freezing
     try:
         driver.execute_cdp_cmd("Debugger.disable", {})
     except: pass
         
     return driver
 
-def main():
-    driver = None
-    valid_streams = []
+def get_sports_channels():
+    """
+    Navigates to the page, applies the Sports filter, and extracts links.
+    """
+    driver = create_driver()
+    wait = WebDriverWait(driver, TIMEOUT)
+    channels = []
     
     try:
-        logging.info("[*] Starting Scraper v27.0 (Sports Filter Mode)...")
-        driver = setup_driver()
-        wait = WebDriverWait(driver, TIMEOUT)
-        
-        # --- 1. NAVIGATE & FILTER ---
-        logging.info("[*] Navigating to 24/7 Channels...")
+        logging.info("[*] Navigating to TimStreams...")
         driver.get(BASE_URL)
         
+        # Click 24/7 Channels
+        btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '24/7 Channels')]")))
+        driver.execute_script("arguments[0].click();", btn)
+        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "btn-watch")))
+        time.sleep(2)
+        
+        # Apply Sports Filter
+        logging.info("[*] Applying 'Sports' Category Filter...")
         try:
-            # Click Menu
-            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '24/7 Channels')]")))
-            driver.execute_script("arguments[0].click();", btn)
-            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "btn-watch")))
-            time.sleep(2)
-            
-            # --- NEW: APPLY SPORTS FILTER ---
-            logging.info("[*] Applying 'Sports' filter...")
-            try:
-                # Locate the dropdown (usually a <select> tag)
-                # We look for the select element that contains the 'Sports' option
-                select_element = driver.find_element(By.XPATH, "//select[.//option[contains(text(), 'Sports')]]")
-                
-                # Select "Sports"
-                select = Select(select_element)
-                select.select_by_visible_text("Sports")
-                
-                logging.info("    [+] Selected 'Sports'. Waiting for grid to update...")
-                time.sleep(3) # Wait for the grid to refresh
-                
-            except Exception as e:
-                # Fallback: Try clicking anything that looks like a dropdown item named Sports
-                logging.warning(f"    [!] Standard select failed ({e}). Trying fallback click...")
-                try:
-                    option = driver.find_element(By.XPATH, "//*[contains(text(), 'Sports')]")
-                    driver.execute_script("arguments[0].click();", option)
-                    time.sleep(3)
-                except:
-                    logging.error("    [!] Could not apply filter. Proceeding with all channels.")
+            # Attempt 1: Standard Select
+            select_element = driver.find_element(By.TAG_NAME, "select")
+            select = Select(select_element)
+            select.select_by_visible_text("Sports")
+            time.sleep(3) # Wait for grid refresh
+        except:
+            logging.warning("[!] Filter click failed. Will filter by text content instead.")
 
-        except Exception as e:
-            logging.critical("[!] Navigation/Filter failed.")
-            raise e
-            
-        # --- 2. EXTRACT VISIBLE CHANNELS ---
+        # Extract Visible Channels
         buttons = driver.find_elements(By.CLASS_NAME, "btn-watch")
-        channels = []
+        logging.info(f"[*] Scanning {len(buttons)} total cards for Sports content...")
         
         for btn in buttons:
             try:
-                # CRITICAL: Only get channels that are VISIBLE (not hidden by filter)
                 if not btn.is_displayed():
                     continue
-                    
-                onclick = btn.get_attribute("onclick")
-                # Get the name from the card
-                raw_name = btn.find_element(By.XPATH, "./../h3").text.strip().replace("24/7:", "").strip()
                 
-                match = re.search(r"['\"](.*?)['\"]", onclick)
-                if match:
-                    full_url = urljoin(BASE_URL, match.group(1))
-                    if not any(x['url'] == full_url for x in channels):
-                        channels.append({'name': raw_name, 'url': full_url})
+                # Double Check: Look for "Sports" text in the card description
+                parent = btn.find_element(By.XPATH, "./..")
+                card_text = parent.text.lower()
+                
+                # Strict Filter: Only add if card explicitly says "Sports" or we successfully filtered earlier
+                # (You can remove 'or True' to enforce strict text filtering if the dropdown fails)
+                if "sports" in card_text or "espn" in card_text or "nfl" in card_text: 
+                    onclick = btn.get_attribute("onclick")
+                    raw_name = parent.find_element(By.TAG_NAME, "h3").text.strip().replace("24/7:", "").strip()
+                    
+                    match = re.search(r"['\"](.*?)['\"]", onclick)
+                    if match:
+                        full_url = urljoin(BASE_URL, match.group(1))
+                        if not any(x['url'] == full_url for x in channels):
+                            channels.append({'name': raw_name, 'url': full_url})
             except:
                 continue
-        
-        logging.info(f"[*] Found {len(channels)} Sports channels.")
-
-        # --- 3. EXTRACTION LOOP (Same as v26) ---
-        for i, ch in enumerate(channels):
-            logging.info(f"[{i+1}/{len(channels)}] Visiting: {ch['name']}")
-            
-            try:
-                del driver.requests # Clear history
-                driver.get(ch['url'])
-                time.sleep(4)
                 
-                # Iframe Handling
-                iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                if iframes:
-                    driver.switch_to.frame(iframes[0])
-                    time.sleep(1)
-                    try:
-                        video = driver.find_element(By.TAG_NAME, "video")
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", video)
-                        driver.execute_script("arguments[0].click();", video)
-                    except:
-                        pass
-                
-                time.sleep(8) 
-                
-                found_link = None
-                
-                # Scan Traffic
-                for request in driver.requests:
-                    if request.response:
-                        url = request.url
-                        
-                        # Catch-All m3u8 filter
-                        if ".m3u8" in url and "http" in url:
-                            found_link = url
-                            if "master" in url or "index" in url:
-                                break
-                
-                if found_link:
-                    logging.info(f"    [+] SUCCESS: {found_link[:60]}...")
-                    valid_streams.append({'name': ch['name'], 'link': found_link})
-                else:
-                    logging.warning("    [-] No stream found.")
-                    
-                driver.switch_to.default_content()
-
-            except Exception as e:
-                logging.error(f"    [!] Error: {e}")
-                driver.switch_to.default_content()
-
     except Exception as e:
-        logging.critical(f"Global Crash: {e}")
-    
+        logging.error(f"[!] Error getting channels: {e}")
     finally:
-        if driver:
-            driver.quit()
+        driver.quit()
         
-        if valid_streams:
-            with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-                f.write("#EXTM3U\n")
-                for stream in valid_streams:
-                    f.write(f'#EXTINF:-1 group-title="TimStreams Sports",{stream["name"]}\n')
-                    f.write(f'{stream["link"]}\n')
-            logging.info(f"[*] DONE. Saved {len(valid_streams)} streams.")
+    logging.info(f"[*] Found {len(channels)} valid Sports channels.")
+    return channels
+
+def process_channel(channel_info):
+    """
+    Worker function to process a single channel.
+    """
+    driver = create_driver()
+    found_link = None
+    
+    try:
+        # logging.info(f"    -> Checking: {channel_info['name']}")
+        driver.get(channel_info['url'])
+        
+        # Handle Iframe
+        time.sleep(2)
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        if iframes:
+            driver.switch_to.frame(iframes[0])
+            time.sleep(1)
+            try:
+                # Center click
+                video = driver.find_element(By.TAG_NAME, "video")
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", video)
+                driver.execute_script("arguments[0].click();", video)
+            except: pass
+        
+        # SMART WAIT LOOP (The Speed Fix)
+        # Instead of sleeping 8s, we check every 0.5s for up to 10s
+        for _ in range(20): 
+            for request in driver.requests:
+                if request.response:
+                    url = request.url
+                    if ".m3u8" in url and "http" in url:
+                        # Success! Found it early.
+                        found_link = url
+                        break
+            if found_link:
+                break
+            time.sleep(0.5)
+            
+    except Exception as e:
+        # logging.error(f"    [!] Error on {channel_info['name']}: {e}")
+        pass
+    finally:
+        driver.quit()
+        
+    if found_link:
+        logging.info(f"    [+] {channel_info['name']} -> Found!")
+        return {'name': channel_info['name'], 'link': found_link}
+    else:
+        logging.warning(f"    [-] {channel_info['name']} -> No stream.")
+        return None
+
+def main():
+    start_time = time.time()
+    
+    # 1. Get Channel List
+    channels = get_sports_channels()
+    
+    if not channels:
+        logging.error("[!] No channels found. Exiting.")
+        return
+
+    # 2. Parallel Processing
+    logging.info(f"[*] Extracting streams using {MAX_WORKERS} workers...")
+    valid_streams = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all tasks
+        future_to_channel = {executor.submit(process_channel, ch): ch for ch in channels}
+        
+        # Process as they complete
+        for future in concurrent.futures.as_completed(future_to_channel):
+            result = future.result()
+            if result:
+                valid_streams.append(result)
+
+    # 3. Save
+    if valid_streams:
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write("#EXTM3U\n")
+            for stream in valid_streams:
+                f.write(f'#EXTINF:-1 group-title="TimStreams Sports",{stream["name"]}\n')
+                f.write(f'{stream["link"]}\n')
+        
+        duration = time.time() - start_time
+        logging.info(f"[*] DONE. Saved {len(valid_streams)} streams in {duration:.2f} seconds.")
+    else:
+        logging.warning("[!] No streams found.")
 
 if __name__ == "__main__":
     main()
