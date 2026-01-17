@@ -1,9 +1,24 @@
+import subprocess
+import sys
 import time
 import logging
 import re
+import os
 from urllib.parse import urljoin
-# CRITICAL: Import from seleniumwire, not selenium
-from seleniumwire import webdriver 
+
+# --- AUTO-INSTALLER (Fixes ModuleNotFoundError) ---
+def install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+try:
+    from seleniumwire import webdriver
+except ImportError:
+    print("[*] Installing missing libraries (selenium-wire)...")
+    install("selenium-wire")
+    install("blinker==1.7.0") # Critical fix for selenium-wire
+    from seleniumwire import webdriver
+# --------------------------------------------------
+
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -32,8 +47,6 @@ def setup_driver():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # We do NOT need goog:loggingPrefs anymore because Selenium-Wire handles it
-    
     service = Service(ChromeDriverManager().install())
     
     # Initialize Selenium-Wire driver
@@ -45,7 +58,7 @@ def main():
     valid_streams = []
     
     try:
-        logging.info("[*] Starting Scraper v22.0 (Selenium-Wire Edition)...")
+        logging.info("[*] Starting Scraper v23.0 (Self-Installing)...")
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
         
@@ -67,7 +80,8 @@ def main():
         for btn in buttons:
             try:
                 onclick = btn.get_attribute("onclick")
-                raw_name = btn.find_element(By.XPATH, "./../h3").text.strip().replace("24/7:", "").strip()
+                parent = btn.find_element(By.XPATH, "./..")
+                raw_name = parent.find_element(By.TAG_NAME, "h3").text.strip().replace("24/7:", "").strip()
                 match = re.search(r"['\"](.*?)['\"]", onclick)
                 if match:
                     full_url = urljoin(BASE_URL, match.group(1))
@@ -101,10 +115,7 @@ def main():
                     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", video)
                     driver.execute_script("arguments[0].play();", video)
                 except:
-                    # Generic click if video tag not found
-                    try:
-                        driver.find_element(By.CSS_SELECTOR, "body").click()
-                    except: pass
+                    pass
                 
                 # Wait for traffic
                 time.sleep(8)
@@ -117,7 +128,7 @@ def main():
                     if request.response:
                         url = request.url
                         
-                        # 1. Check for specific Keywords (from your screenshot)
+                        # 1. Check for specific Keywords (railway app from screenshot)
                         if "railway.app" in url and ".m3u8" in url:
                             found_link = url
                             break
@@ -125,7 +136,6 @@ def main():
                         # 2. Check for generic m3u8
                         if ".m3u8" in url:
                             found_link = url
-                            # Prefer master playlists
                             if "master" in url or "playlist" in url:
                                 break
                 
@@ -133,7 +143,7 @@ def main():
                     logging.info(f"    [+] SUCCESS: {found_link[:80]}...")
                     valid_streams.append({'name': ch['name'], 'link': found_link})
                 else:
-                    logging.warning("    [-] No stream found in network traffic.")
+                    logging.warning("    [-] No stream found.")
                     
                 driver.switch_to.default_content()
 
