@@ -2,6 +2,9 @@ import time
 import re
 import concurrent.futures
 from urllib.parse import unquote
+from bs4 import BeautifulSoup
+
+# Selenium Imports
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -13,18 +16,25 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
-OUTPUT_FILE = "timstreams_universal.m3u"
+OUTPUT_FILE = "timstreams_force.m3u"
 MAX_WORKERS = 3
 TIMEOUT = 30
 
 def setup_driver():
+    """Creates a stealthy Chrome instance."""
     chrome_options = Options()
     chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36")
+    
+    # Anti-Detection: Disable 'AutomationControlled' flag
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=chrome_options)
@@ -38,85 +48,87 @@ def get_channels():
         driver.get(BASE_URL)
         wait = WebDriverWait(driver, TIMEOUT)
         
-        # --- ATTEMPT 1: CLICK 24/7 CHANNELS ---
-        print("[*] Attempting to enter '24/7 Channels'...")
-        try:
-            # Try finding the button by text
-            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '24/7 Channels')]")))
-            driver.execute_script("arguments[0].click();", btn)
-            time.sleep(5)
-        except Exception as e:
-            print(f"[!] Click warning: {e}")
-
-        # --- SCROLLING ---
-        print("[*] Scrolling to load content...")
-        for _ in range(3):
-            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.END)
-            time.sleep(2)
-
-        # --- STRATEGY A: Standard Links (Cartoons/Movies) ---
-        print("[*] Scanning for Standard Links (<a> tags)...")
-        elements = driver.find_elements(By.TAG_NAME, "a")
-        for elem in elements:
-            try:
-                href = elem.get_attribute("href")
-                text = elem.text.strip() or elem.get_attribute("innerText").strip()
-                
-                if href and BASE_URL in href and "javascript" not in href:
-                    # Filter out system links
-                    if any(x in href.lower() for x in ['donate', 'login', 'register', 'discord', 'policy']):
-                        continue
-                    
-                    # If it looks like a channel
-                    if not any(d['url'] == href for d in links_found):
-                        name = text if text else href.split("/")[-1].replace("-", " ").title()
-                        links_found.append({'name': name, 'url': href, 'type': 'standard'})
-            except:
-                continue
-
-        # --- STRATEGY B: "Tune In" Buttons (Live TV/Sports) ---
-        # This fixes the issue seen in your screenshot where only "Tune In" buttons exist
-        print("[*] Scanning for 'Tune In' Buttons (Javascript Links)...")
-        buttons = driver.find_elements(By.XPATH, "//*[contains(text(), 'Tune In')]")
+        # --- STEP 1: FORCE THE CLICK ---
+        print("[*] Looking for '24/7 Channels' button...")
         
-        for btn in buttons:
-            try:
-                # 1. Check if the button itself has an onclick
-                raw_onclick = btn.get_attribute("onclick")
-                
-                # 2. If not, check the parent container
-                if not raw_onclick:
-                    parent = btn.find_element(By.XPATH, "./..")
-                    raw_onclick = parent.get_attribute("onclick")
-                
-                # 3. If not, check if it's wrapped in an <a> tag without a visible href
-                parent_a = btn.find_element(By.XPATH, "./..") if btn.tag_name != "a" else btn
-                href = parent_a.get_attribute("href")
+        # Take a 'Before' screenshot to verify we are on the homepage
+        driver.save_screenshot("debug_01_homepage.png")
+        
+        try:
+            # Try to find the button by text
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '24/7 Channels')]")))
+            
+            # Click strategy: JavaScript click (most reliable for SPAs)
+            driver.execute_script("arguments[0].click();", btn)
+            print("[*] Click command sent.")
+            
+        except Exception as e:
+            print(f"[!] Could not click button: {e}")
+            return []
 
-                target_url = None
-                
-                if href:
-                    target_url = href
-                elif raw_onclick:
-                    # Extract URL from: window.location.href='https://...' or open('https://...')
-                    match = re.search(r"['\"](https?://.*?)['\"]", raw_onclick)
-                    if match:
-                        target_url = match.group(1)
-
-                if target_url:
-                    # Try to find the Name (usually in a sibling div or h3)
-                    # We go up to the card container and find the title
-                    try:
-                        card = btn.find_element(By.XPATH, "./ancestor::div[contains(@class, 'card') or contains(@class, 'box')]")
-                        name_el = card.find_element(By.TAG_NAME, "h3") or card.find_element(By.TAG_NAME, "h4")
-                        name = name_el.text.strip()
-                    except:
-                        name = "Live Channel"
-
-                    if not any(d['url'] == target_url for d in links_found):
-                         links_found.append({'name': name, 'url': target_url, 'type': 'live'})
-            except Exception as e:
+        # --- STEP 2: VERIFY PAGE LOAD ---
+        print("[*] Waiting for 'Refresh Category' or 'Search' to appear...")
+        try:
+            # We wait for the 'Refresh Category' button shown in your screenshot
+            # OR the 'All Genres' dropdown. This confirms we moved pages.
+            wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Refresh Category') or contains(text(), 'All Genres')]")))
+            print("[+] Page transition successful!")
+        except:
+            print("[!] Verification failed. Taking debug screenshot.")
+            driver.save_screenshot("debug_02_click_failed.png")
+            # We continue anyway, just in case scraping still works
+            
+        # Small buffer for grid images to render
+        time.sleep(5)
+        
+        # --- STEP 3: DUMP HTML & PARSE WITH SOUP ---
+        # Selenium is sometimes bad at finding deep elements. We dump the whole HTML and use BeautifulSoup.
+        print("[*] Dumping HTML for parsing...")
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        
+        # Strategy A: Find all 'a' tags
+        all_links = soup.find_all('a', href=True)
+        print(f"[*] Found {len(all_links)} total links in HTML.")
+        
+        blocklist = ['donate', 'login', 'register', 'discord', 'policy', 'multiview', 'upcoming', 'replay']
+        
+        for link in all_links:
+            href = link['href']
+            text = link.get_text(strip=True)
+            
+            # Filter bad links
+            if not href or href == "#" or href == BASE_URL or "javascript" in href:
                 continue
+            if any(bad in href.lower() for bad in blocklist) or any(bad in text.lower() for bad in blocklist):
+                continue
+                
+            # If no text, try to guess name from URL
+            if not text:
+                text = href.split('/')[-1].replace('-', ' ').title()
+            
+            # Save valid channel
+            if not any(d['url'] == href for d in links_found):
+                links_found.append({'name': text, 'url': href, 'type': 'standard'})
+
+        # Strategy B: Find "Tune In" Buttons (If user is on Live TV page)
+        # Look for elements with "Tune In" text
+        tune_in_buttons = soup.find_all(string=re.compile("Tune In"))
+        for text_node in tune_in_buttons:
+            # Walk up to find the parent button or div
+            parent = text_node.parent
+            # Look for onclick
+            onclick = parent.get('onclick')
+            if not onclick:
+                # Go up one more level
+                onclick = parent.parent.get('onclick')
+            
+            if onclick:
+                 match = re.search(r"['\"](https?://.*?)['\"]", onclick)
+                 if match:
+                     url = match.group(1)
+                     name = "Live Channel" # Placeholder
+                     if not any(d['url'] == url for d in links_found):
+                         links_found.append({'name': name, 'url': url, 'type': 'live'})
 
     except Exception as e:
         print(f"[!] Critical Error: {e}")
@@ -133,7 +145,7 @@ def process_channel(channel_info):
     
     try:
         driver.get(channel_info['url'])
-        time.sleep(4) 
+        time.sleep(3) 
         
         page_source = driver.page_source
         
@@ -152,13 +164,13 @@ def process_channel(channel_info):
                 m3u8_link = link
                 break
         
-        # Fallback for iframes
+        # Fallback: Check iframes
         if not m3u8_link:
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            soup = BeautifulSoup(page_source, 'html.parser')
+            iframes = soup.find_all('iframe', src=True)
             for frame in iframes:
-                src = frame.get_attribute("src")
-                if src and ".m3u8" in src:
-                    m3u8_link = src
+                if ".m3u8" in frame['src']:
+                    m3u8_link = frame['src']
                     break
 
     except Exception:
@@ -177,7 +189,7 @@ def main():
     channels = get_channels()
     
     if not channels:
-        print("[!] No channels found. Use the debug screenshot to investigate.")
+        print("[!] No channels found. Check 'debug_02_click_failed.png' in Artifacts.")
         return
 
     valid_streams = []
