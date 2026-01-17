@@ -29,26 +29,18 @@ jobs:
       - name: Run Scraper
         run: python convert.py
 
-      # UPDATED: Captures HTML, PNG, and LOG files
-      - name: Upload Debug Artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: debug-files
-          path: |
-            *.png
-            *.html
-            *.log
-          retention-days: 5
-
+      
       - name: Commit and Push changes
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           
-          if [ -f timstreams_ultimate.m3u ]; then
-            git add timstreams_ultimate.m3u
-            git diff --quiet && git diff --staged --quiet || (git commit -m "Update playlist" && git push)
+          # FIXED: Now checks for the correct filename 'timstreams_sports.m3u'
+          if [ -f timstreams_sports.m3u ]; then
+            git add timstreams_sports.m3u
+            git diff --quiet && git diff --staged --quiet || (git commit -m "Update sports playlist" && git push)
           else
             echo "Warning: No M3U file found. Skipping commit."
+            exit 1  # Fail the action if file is missing so you know something is wrong
           fi
+
