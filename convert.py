@@ -1,7 +1,6 @@
 import time
 import json
-import concurrent.futures
-from urllib.parse import urljoin
+import re
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -12,182 +11,126 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
-OUTPUT_FILE = "timstreams_v9.m3u"
-MAX_WORKERS = 1  # Keep 1 for network reliability
+OUTPUT_FILE = "timstreams_ultimate.m3u"
 TIMEOUT = 30
 
 def setup_driver():
-    """Creates a Chrome instance with Network Logging enabled."""
-    chrome_options = Options()
-    chrome_options.add_argument("--headless") 
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    options = Options()
+    options.add_argument("--headless") 
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # Enable Performance Logging
-    chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+    # Enable Network Logging (The "Sniffer")
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     
     service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=chrome_options)
+    return webdriver.Chrome(service=service, options=options)
 
-def get_channels():
-    print(f"[*] Navigating to {BASE_URL}...")
+def main():
     driver = setup_driver()
-    links_found = []
+    valid_streams = []
     
     try:
+        print(f"[*] Navigating to {BASE_URL}...")
         driver.get(BASE_URL)
         wait = WebDriverWait(driver, TIMEOUT)
         
-        # --- STEP 1: FORCE NAVIGATION ---
+        # --- 1. NAVIGATE TO 24/7 PAGE ---
         print("[*] Finding '24/7 Channels' button...")
-        
-        # Try finding visible buttons first
-        buttons = driver.find_elements(By.XPATH, "//*[contains(text(), '24/7 Channels')]")
-        clicked = False
-        
-        for btn in buttons:
-            if btn.is_displayed():
-                driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-                time.sleep(1)
-                driver.execute_script("arguments[0].click();", btn)
-                clicked = True
-                break
-        
-        if not clicked and buttons:
-            print("    - Force-clicking hidden button...")
-            driver.execute_script("arguments[0].click();", buttons[0])
-
-        # --- STEP 2: VERIFY PAGE LOAD ---
-        print("[*] Waiting for content...")
         try:
-            # Wait for search bar (Confirmed from your logs this works)
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[placeholder*='Search']")))
-            print("[+] Page Loaded Successfully.")
+            # Find button by text (robust match)
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '24/7 Channels')]")))
+            driver.execute_script("arguments[0].click();", btn)
+        except Exception as e:
+            print("[!] Navigation failed. Saving screenshot.")
+            driver.save_screenshot("debug_nav_fail.png")
+            raise e
+
+        # --- 2. WAIT FOR GRID TO LOAD ---
+        print("[*] Waiting for channels...")
+        try:
+            # We explicitly wait for the text "24/7:" which appears on every card in your screenshot
+            wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '24/7:')]")))
+            time.sleep(5) # Let all images load
         except:
-            print("[!] Navigation check timed out (Script might still work)...")
-
-        # --- STEP 3: SCRAPE CHANNELS (LOOSE FILTER) ---
-        print("[*] Scraping all links...")
-        time.sleep(5) # Wait for JS to populate grid
-        
-        elements = driver.find_elements(By.TAG_NAME, "a")
-        
-        # System links to ignore
-        blocklist = ['donate', 'login', 'register', 'discord', 'policy', 'multiview', 'upcoming', 'replay', 'dmca', 'home']
-        
-        for elem in elements:
-            try:
-                href = elem.get_attribute("href")
-                text = elem.text.strip()
-                
-                # Get inner text if standard text is empty (sometimes hidden in spans)
-                if not text:
-                    text = elem.get_attribute("innerText").strip()
-
-                # Basic validation
-                if not href or "javascript" in href:
-                    continue
-                    
-                # Fix relative links (e.g. /watch/bluey -> https://timstreams.site/watch/bluey)
-                full_url = urljoin(BASE_URL, href)
-                
-                # Apply Blocklist
-                if any(bad in full_url.lower() for bad in blocklist) or any(bad in text.lower() for bad in blocklist):
-                    continue
-
-                # If it looks vaguely like a content link
-                # We assume anything remaining is a channel
-                if full_url != BASE_URL:
-                    # Name fallback
-                    name = text if text else full_url.split("/")[-1].replace("-", " ").title()
-                    
-                    if not any(d['url'] == full_url for d in links_found):
-                        links_found.append({'name': name, 'url': full_url})
-            except:
-                continue
-
-        # --- DEBUG: DUMP HTML IF EMPTY ---
-        if len(links_found) == 0:
-            print("[!] 0 Channels found. Dumping HTML for debugging...")
+            print("[!] Grid load timed out. dumping HTML...")
             with open("debug_source.html", "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
+            raise Exception("Channels did not load.")
+
+        # --- 3. IDENTIFY CHANNELS ---
+        # Instead of links, we find the text elements containing "24/7:"
+        # Then we find their clickable parents.
+        channel_elements = driver.find_elements(By.XPATH, "//*[contains(text(), '24/7:')]")
+        print(f"[*] Found {len(channel_elements)} visual channel cards.")
+        
+        # We store the NAMES now, because the elements will become "stale" once we click one.
+        channel_names = [elem.text.strip() for elem in channel_elements if elem.text.strip()]
+        
+        # --- 4. THE LOOP: CLICK -> SNIFF -> BACK ---
+        for i, raw_name in enumerate(channel_names):
+            clean_name = raw_name.replace("24/7:", "").strip()
+            print(f"[{i+1}/{len(channel_names)}] Processing: {clean_name}")
+            
+            try:
+                # A. Re-Find the element (because page refreshed/changed)
+                # We find the specific text element again
+                target_el = driver.find_element(By.XPATH, f"//*[contains(text(), '{raw_name}')]")
+                
+                # B. Click it (Force click parent if needed)
+                # We assume the text is inside the clickable card
+                driver.execute_script("arguments[0].click();", target_el)
+                
+                # C. Wait & Sniff
+                time.sleep(6) # Wait for player to start request
+                
+                found_link = None
+                logs = driver.get_log("performance")
+                
+                for entry in logs:
+                    message = json.loads(entry["message"])["message"]
+                    if message["method"] == "Network.requestWillBeSent":
+                        url = message["params"]["request"]["url"]
+                        if ".m3u8" in url and "http" in url:
+                            found_link = url
+                            if "token" in url: break # Prefer token links
+                
+                if found_link:
+                    print(f"    [+] Success! Found stream.")
+                    valid_streams.append({'name': clean_name, 'link': found_link})
+                else:
+                    print(f"    [-] No .m3u8 traffic captured.")
+                    
+                # D. Go Back to list
+                driver.back()
+                # Wait for grid to reappear
+                wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '24/7:')]")))
+                time.sleep(2)
+
+            except Exception as e:
+                print(f"    [!] Error on channel: {e}")
+                # Try to recover navigation
+                driver.get(BASE_URL)
+                time.sleep(3)
+                driver.find_element(By.XPATH, "//*[contains(text(), '24/7 Channels')]").click()
+                time.sleep(3)
 
     except Exception as e:
-        print(f"[!] Error: {e}")
+        print(f"[!] Critical Error: {e}")
     finally:
         driver.quit()
-        
-    print(f"[*] Found {len(links_found)} potential channels.")
-    return links_found
 
-def sniff_stream(channel_info):
-    driver = setup_driver()
-    stream_url = None
-    
-    try:
-        print(f"    Scanning: {channel_info['name']}...")
-        driver.get(channel_info['url'])
-        time.sleep(6) # Wait for player
-        
-        # 1. Network Sniffing
-        logs = driver.get_log("performance")
-        for entry in logs:
-            message = json.loads(entry["message"])["message"]
-            if message["method"] == "Network.requestWillBeSent":
-                url = message["params"]["request"]["url"]
-                if ".m3u8" in url and "http" in url:
-                    stream_url = url
-                    if "token" in url: # Prefer tokenized links
-                        break
-        
-        # 2. Iframe Fallback
-        if not stream_url:
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            for frame in iframes:
-                src = frame.get_attribute("src")
-                if src and ".m3u8" in src:
-                    stream_url = src
-                    break
-
-    except Exception:
-        pass
-    finally:
-        driver.quit()
-        
-    if stream_url:
-        print(f"    [+] FOUND: {stream_url[:50]}...")
-        return {'name': channel_info['name'], 'link': stream_url}
-    else:
-        print(f"    [-] No stream found.")
-        return None
-
-def main():
-    channels = get_channels()
-    
-    if not channels:
-        print("[!] No channels found. Please upload 'debug_source.html' to the chat.")
-        return
-
-    valid_streams = []
-    print(f"[*] Sniffing streams from {len(channels)} channels...")
-    
-    # Limit to first 3 channels for testing speed (Remove [:3] to run all)
-    for channel in channels: 
-        result = sniff_stream(channel)
-        if result:
-            valid_streams.append(result)
-
+    # --- 5. SAVE FILE ---
     if valid_streams:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
             for stream in valid_streams:
-                clean_name = stream["name"].replace("24/7:", "").strip()
-                f.write(f'#EXTINF:-1 group-title="TimStreams",{clean_name}\n')
+                f.write(f'#EXTINF:-1 group-title="TimStreams",{stream["name"]}\n')
                 f.write(f'{stream["link"]}\n')
-        print(f"[*] Saved {len(valid_streams)} streams.")
+        print(f"[*] DONE. Saved {len(valid_streams)} streams to {OUTPUT_FILE}")
     else:
         print("[!] No streams found.")
 
