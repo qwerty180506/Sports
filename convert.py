@@ -24,11 +24,12 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import Select
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
-OUTPUT_FILE = "timstreams.m3u"  # Simplified name
+OUTPUT_FILE = "timstreams_sports.m3u"  # Renamed for clarity
 LOG_FILE = "scraper.log"
 TIMEOUT = 45
 
@@ -62,29 +63,63 @@ def main():
     valid_streams = []
     
     try:
-        logging.info("[*] Starting Scraper v26.0 (Catch-All Mode)...")
+        logging.info("[*] Starting Scraper v27.0 (Sports Filter Mode)...")
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
         
-        # --- 1. EXTRACT CHANNELS ---
-        logging.info("[*] Extracting channel list...")
+        # --- 1. NAVIGATE & FILTER ---
+        logging.info("[*] Navigating to 24/7 Channels...")
         driver.get(BASE_URL)
         
         try:
+            # Click Menu
             btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '24/7 Channels')]")))
             driver.execute_script("arguments[0].click();", btn)
             wait.until(EC.presence_of_element_located((By.CLASS_NAME, "btn-watch")))
             time.sleep(2)
+            
+            # --- NEW: APPLY SPORTS FILTER ---
+            logging.info("[*] Applying 'Sports' filter...")
+            try:
+                # Locate the dropdown (usually a <select> tag)
+                # We look for the select element that contains the 'Sports' option
+                select_element = driver.find_element(By.XPATH, "//select[.//option[contains(text(), 'Sports')]]")
+                
+                # Select "Sports"
+                select = Select(select_element)
+                select.select_by_visible_text("Sports")
+                
+                logging.info("    [+] Selected 'Sports'. Waiting for grid to update...")
+                time.sleep(3) # Wait for the grid to refresh
+                
+            except Exception as e:
+                # Fallback: Try clicking anything that looks like a dropdown item named Sports
+                logging.warning(f"    [!] Standard select failed ({e}). Trying fallback click...")
+                try:
+                    option = driver.find_element(By.XPATH, "//*[contains(text(), 'Sports')]")
+                    driver.execute_script("arguments[0].click();", option)
+                    time.sleep(3)
+                except:
+                    logging.error("    [!] Could not apply filter. Proceeding with all channels.")
+
         except Exception as e:
-            logging.critical("[!] Menu navigation failed.")
+            logging.critical("[!] Navigation/Filter failed.")
             raise e
             
+        # --- 2. EXTRACT VISIBLE CHANNELS ---
         buttons = driver.find_elements(By.CLASS_NAME, "btn-watch")
         channels = []
+        
         for btn in buttons:
             try:
+                # CRITICAL: Only get channels that are VISIBLE (not hidden by filter)
+                if not btn.is_displayed():
+                    continue
+                    
                 onclick = btn.get_attribute("onclick")
+                # Get the name from the card
                 raw_name = btn.find_element(By.XPATH, "./../h3").text.strip().replace("24/7:", "").strip()
+                
                 match = re.search(r"['\"](.*?)['\"]", onclick)
                 if match:
                     full_url = urljoin(BASE_URL, match.group(1))
@@ -93,9 +128,9 @@ def main():
             except:
                 continue
         
-        logging.info(f"[*] Found {len(channels)} channels.")
+        logging.info(f"[*] Found {len(channels)} Sports channels.")
 
-        # --- 2. EXTRACTION LOOP ---
+        # --- 3. EXTRACTION LOOP (Same as v26) ---
         for i, ch in enumerate(channels):
             logging.info(f"[{i+1}/{len(channels)}] Visiting: {ch['name']}")
             
@@ -116,20 +151,18 @@ def main():
                     except:
                         pass
                 
-                # Wait for video to start
                 time.sleep(8) 
                 
                 found_link = None
                 
-                # --- RELAXED FILTER LOGIC ---
+                # Scan Traffic
                 for request in driver.requests:
                     if request.response:
                         url = request.url
                         
-                        # CATCH-ALL: If it is an m3u8, we take it.
+                        # Catch-All m3u8 filter
                         if ".m3u8" in url and "http" in url:
                             found_link = url
-                            # Optional: If we find a 'master' or 'index', we prefer that and stop looking
                             if "master" in url or "index" in url:
                                 break
                 
@@ -156,7 +189,7 @@ def main():
             with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                 f.write("#EXTM3U\n")
                 for stream in valid_streams:
-                    f.write(f'#EXTINF:-1 group-title="TimStreams",{stream["name"]}\n')
+                    f.write(f'#EXTINF:-1 group-title="TimStreams Sports",{stream["name"]}\n')
                     f.write(f'{stream["link"]}\n')
             logging.info(f"[*] DONE. Saved {len(valid_streams)} streams.")
 
