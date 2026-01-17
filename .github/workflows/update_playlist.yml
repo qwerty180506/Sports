@@ -31,6 +31,14 @@ jobs:
 
       - name: Run Scraper
         run: python convert.py
+
+      - name: Upload Debug Screenshot (If Exists)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug-screenshots
+          path: "*.png"
+          retention-days: 5
         
 
       - name: Commit and Push changes
