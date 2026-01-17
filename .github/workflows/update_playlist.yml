@@ -27,7 +27,7 @@ jobs:
           pip install requests beautifulsoup4 selenium webdriver-manager
 
       - name: Run Scraper
-        run: python timstreams_scraper.py
+        run: python convert.py
 
       # UPDATED: Captures HTML, PNG, and LOG files
       - name: Upload Debug Artifacts
