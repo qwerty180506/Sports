@@ -12,7 +12,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
-OUTPUT_FILE = "timstreams_v12.m3u"
+OUTPUT_FILE = "timstreams_v13.m3u"
 LOG_FILE = "scraper.log"
 TIMEOUT = 30
 
@@ -30,7 +30,6 @@ def setup_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    # Stealth settings
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     
@@ -42,7 +41,7 @@ def main():
     valid_streams = []
     
     try:
-        logging.info(f"[*] Starting Scraper v12.0...")
+        logging.info(f"[*] Starting Scraper v13.0 (Div-Clicker Mode)...")
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
         
@@ -68,7 +67,6 @@ def main():
             raise Exception("Grid timeout")
 
         # --- 3. GET CHANNEL NAMES ---
-        # We grab the names first so we can iterate by text
         elements = driver.find_elements(By.XPATH, "//*[contains(text(), '24/7:')]")
         channel_names = [e.text.strip() for e in elements if e.text.strip()]
         logging.info(f"[*] Found {len(channel_names)} channels to process.")
@@ -79,36 +77,40 @@ def main():
             logging.info(f"[{i+1}/{len(channel_names)}] Processing: {clean_name}")
             
             try:
-                # A. Find the text element
+                # A. Find the text element again
                 text_el = driver.find_element(By.XPATH, f"//*[contains(text(), '{raw_name}')]")
                 
-                # B. Find the PARENT LINK (Crucial Fix)
-                # We climb up the HTML tree until we find an <a> tag
-                parent_link = text_el.find_element(By.XPATH, "./ancestor::a")
-                
-                # C. Click and Verify Navigation
+                # B. CLICK STRATEGY (The Fix)
+                # Strategy 1: Click the text directly
                 current_url = driver.current_url
-                driver.execute_script("arguments[0].click();", parent_link)
+                driver.execute_script("arguments[0].click();", text_el)
                 
-                # Wait for URL to change (max 5 seconds)
+                # Check if URL changed
+                time.sleep(1)
+                if driver.current_url == current_url:
+                    # Strategy 2: Click the PARENT element (The Card Div)
+                    logging.info("    - Text click failed. Clicking parent...")
+                    parent = text_el.find_element(By.XPATH, "./..")
+                    driver.execute_script("arguments[0].click();", parent)
+                
+                # Wait for navigation
                 try:
                     WebDriverWait(driver, 5).until(EC.url_changes(current_url))
                     logging.info("    [+] Navigation confirmed.")
                 except:
-                    logging.warning("    [!] URL did not change. Click might have failed.")
-                    continue # Skip to next channel if we didn't move
+                    logging.warning("    [!] URL did not change. Skipping.")
+                    continue 
 
-                # D. Force Play & Sniff
-                time.sleep(2) # Wait for DOM
+                # C. Force Play & Sniff
+                time.sleep(2) # Wait for page load
                 
-                # Try to press play button if it exists
+                # Try to press play on video tag
                 try:
                     driver.execute_script("document.getElementsByTagName('video')[0].play()")
-                    logging.info("    [+] Sent 'Play' command.")
                 except:
                     pass
 
-                time.sleep(6) # Listen for network traffic
+                time.sleep(5) # Sniff duration
                 
                 found_link = None
                 logs = driver.get_log("performance")
@@ -127,16 +129,16 @@ def main():
                     logging.info(f"    [+] Found Stream!")
                     valid_streams.append({'name': clean_name, 'link': found_link})
                 else:
-                    logging.warning("    [-] No M3U8 found.")
+                    logging.warning("    [-] No M3U8 traffic.")
 
-                # E. Go Back safely
+                # D. Go Back safely
                 driver.back()
                 wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '24/7:')]")))
                 time.sleep(2)
 
             except Exception as e:
                 logging.error(f"    [!] Failed: {e}")
-                # Reset to grid if lost
+                # Reset
                 driver.get(BASE_URL)
                 time.sleep(2)
                 try:
@@ -151,7 +153,6 @@ def main():
 
     finally:
         if driver:
-            driver.save_screenshot("final_debug.png")
             driver.quit()
         
         if valid_streams:
