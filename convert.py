@@ -3,21 +3,21 @@ import sys
 import time
 import logging
 import re
-import os
+import json
 from urllib.parse import urljoin
 
-# --- AUTO-INSTALLER (Fixes ModuleNotFoundError) ---
+# --- AUTO-INSTALLER ---
 def install(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
 try:
     from seleniumwire import webdriver
 except ImportError:
-    print("[*] Installing missing libraries (selenium-wire)...")
+    print("[*] Installing selenium-wire...")
     install("selenium-wire")
-    install("blinker==1.7.0") # Critical fix for selenium-wire
+    install("blinker==1.7.0")
     from seleniumwire import webdriver
-# --------------------------------------------------
+# ----------------------
 
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -28,9 +28,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
-OUTPUT_FILE = "timstreams_wire.m3u"
+OUTPUT_FILE = "timstreams_final.m3u"
 LOG_FILE = "scraper.log"
-TIMEOUT = 30
+TIMEOUT = 45 # Increased timeout for slow loading
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,9 +48,16 @@ def setup_driver():
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     service = Service(ChromeDriverManager().install())
-    
-    # Initialize Selenium-Wire driver
     driver = webdriver.Chrome(service=service, options=options)
+    
+    # --- THE CRITICAL FIX: DISABLE DEBUGGER TRAPS ---
+    # This prevents the "Paused in Debugger" issue you found.
+    try:
+        driver.execute_cdp_cmd("Debugger.disable", {})
+        logging.info("[*] Anti-Debugger active: Breakpoints disabled.")
+    except:
+        logging.warning("[!] Could not disable debugger (might be irrelevant).")
+        
     return driver
 
 def main():
@@ -58,7 +65,7 @@ def main():
     valid_streams = []
     
     try:
-        logging.info("[*] Starting Scraper v23.0 (Self-Installing)...")
+        logging.info("[*] Starting Scraper v25.0 (Anti-Freeze Edition)...")
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
         
@@ -80,8 +87,7 @@ def main():
         for btn in buttons:
             try:
                 onclick = btn.get_attribute("onclick")
-                parent = btn.find_element(By.XPATH, "./..")
-                raw_name = parent.find_element(By.TAG_NAME, "h3").text.strip().replace("24/7:", "").strip()
+                raw_name = btn.find_element(By.XPATH, "./../h3").text.strip().replace("24/7:", "").strip()
                 match = re.search(r"['\"](.*?)['\"]", onclick)
                 if match:
                     full_url = urljoin(BASE_URL, match.group(1))
@@ -92,55 +98,56 @@ def main():
         
         logging.info(f"[*] Found {len(channels)} channels.")
 
-        # --- 2. SNIFFING LOOP ---
+        # --- 2. EXTRACTION LOOP ---
         for i, ch in enumerate(channels):
             logging.info(f"[{i+1}/{len(channels)}] Visiting: {ch['name']}")
             
             try:
-                # Clear previous requests so we don't mix up channels
-                del driver.requests
-                
+                del driver.requests # Clear history
                 driver.get(ch['url'])
-                time.sleep(2)
+                time.sleep(4)
                 
                 # Iframe Handling
                 iframes = driver.find_elements(By.TAG_NAME, "iframe")
                 if iframes:
                     driver.switch_to.frame(iframes[0])
                     time.sleep(1)
+                    
+                    # Try center click inside iframe
+                    try:
+                        video = driver.find_element(By.TAG_NAME, "video")
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", video)
+                        driver.execute_script("arguments[0].click();", video)
+                    except:
+                        try:
+                            driver.find_element(By.CSS_SELECTOR, "body").click()
+                        except: pass
                 
-                # Try to Play (Center Click)
-                try:
-                    video = driver.find_element(By.TAG_NAME, "video")
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", video)
-                    driver.execute_script("arguments[0].play();", video)
-                except:
-                    pass
+                # Wait for video to initialize and request the .m3u8
+                time.sleep(8) 
                 
-                # Wait for traffic
-                time.sleep(8)
-                
-                # --- TRAFFIC ANALYSIS (THE WIRE) ---
                 found_link = None
                 
-                # Iterate through captured requests
+                # --- SCAN TRAFFIC FOR YOUR RAILWAY LINK ---
                 for request in driver.requests:
                     if request.response:
                         url = request.url
                         
-                        # 1. Check for specific Keywords (railway app from screenshot)
+                        # 1. Exact match for the pattern you found
                         if "railway.app" in url and ".m3u8" in url:
                             found_link = url
                             break
                         
-                        # 2. Check for generic m3u8
-                        if ".m3u8" in url:
-                            found_link = url
-                            if "master" in url or "playlist" in url:
+                        # 2. Generic m3u8 match (backup)
+                        if ".m3u8" in url and "http" in url:
+                            # Avoid junk segments, look for master/playlist or your specific token
+                            if "master" in url or "playlist" in url or "X-Amz-Algorithm" in url:
+                                found_link = url
                                 break
                 
                 if found_link:
-                    logging.info(f"    [+] SUCCESS: {found_link[:80]}...")
+                    # Log snippet of URL to confirm it matches your findings
+                    logging.info(f"    [+] SUCCESS: {found_link[:60]}...")
                     valid_streams.append({'name': ch['name'], 'link': found_link})
                 else:
                     logging.warning("    [-] No stream found.")
