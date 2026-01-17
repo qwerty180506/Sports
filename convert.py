@@ -28,9 +28,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 BASE_URL = "https://timstreams.site/"
-OUTPUT_FILE = "timstreams_final.m3u"
+OUTPUT_FILE = "timstreams.m3u"  # Simplified name
 LOG_FILE = "scraper.log"
-TIMEOUT = 45 # Increased timeout for slow loading
+TIMEOUT = 45
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,13 +50,10 @@ def setup_driver():
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
     
-    # --- THE CRITICAL FIX: DISABLE DEBUGGER TRAPS ---
-    # This prevents the "Paused in Debugger" issue you found.
+    # Disable Debugger to prevent freezing
     try:
         driver.execute_cdp_cmd("Debugger.disable", {})
-        logging.info("[*] Anti-Debugger active: Breakpoints disabled.")
-    except:
-        logging.warning("[!] Could not disable debugger (might be irrelevant).")
+    except: pass
         
     return driver
 
@@ -65,7 +62,7 @@ def main():
     valid_streams = []
     
     try:
-        logging.info("[*] Starting Scraper v25.0 (Anti-Freeze Edition)...")
+        logging.info("[*] Starting Scraper v26.0 (Catch-All Mode)...")
         driver = setup_driver()
         wait = WebDriverWait(driver, TIMEOUT)
         
@@ -112,41 +109,31 @@ def main():
                 if iframes:
                     driver.switch_to.frame(iframes[0])
                     time.sleep(1)
-                    
-                    # Try center click inside iframe
                     try:
                         video = driver.find_element(By.TAG_NAME, "video")
                         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", video)
                         driver.execute_script("arguments[0].click();", video)
                     except:
-                        try:
-                            driver.find_element(By.CSS_SELECTOR, "body").click()
-                        except: pass
+                        pass
                 
-                # Wait for video to initialize and request the .m3u8
+                # Wait for video to start
                 time.sleep(8) 
                 
                 found_link = None
                 
-                # --- SCAN TRAFFIC FOR YOUR RAILWAY LINK ---
+                # --- RELAXED FILTER LOGIC ---
                 for request in driver.requests:
                     if request.response:
                         url = request.url
                         
-                        # 1. Exact match for the pattern you found
-                        if "railway.app" in url and ".m3u8" in url:
-                            found_link = url
-                            break
-                        
-                        # 2. Generic m3u8 match (backup)
+                        # CATCH-ALL: If it is an m3u8, we take it.
                         if ".m3u8" in url and "http" in url:
-                            # Avoid junk segments, look for master/playlist or your specific token
-                            if "master" in url or "playlist" in url or "X-Amz-Algorithm" in url:
-                                found_link = url
+                            found_link = url
+                            # Optional: If we find a 'master' or 'index', we prefer that and stop looking
+                            if "master" in url or "index" in url:
                                 break
                 
                 if found_link:
-                    # Log snippet of URL to confirm it matches your findings
                     logging.info(f"    [+] SUCCESS: {found_link[:60]}...")
                     valid_streams.append({'name': ch['name'], 'link': found_link})
                 else:
